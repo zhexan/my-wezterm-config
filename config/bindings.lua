@@ -1,6 +1,7 @@
 local wezterm = require('wezterm')
 local platform = require('utils.platform')
 local backdrops = require('utils.backdrops')
+local layouts = require('utils.layouts')
 local act = wezterm.action
 
 local mod = {}
@@ -196,9 +197,35 @@ local keys = {
    { key = 'PageUp',   mods = 'NONE',    action = act.ScrollByPage(-0.75) },
    { key = 'PageDown', mods = 'NONE',    action = act.ScrollByPage(0.75) },
 
-   -- key-tables --
-   -- resizes fonts
-   {
+    -- key-tables --
+    -- pane layouts
+    -- pane layouts
+    { key = '1', mods = 'LEADER', action = wezterm.action_callback(layouts.left_large_right_small) },
+    { key = '2', mods = 'LEADER', action = wezterm.action_callback(layouts.grid_2x2) },
+
+    -- quick file opener (opens selected path in neovim)
+    {
+       key = 'f',
+       mods = mod.SUPER_REV,
+       action = act.QuickSelectArgs({
+          label = 'open file',
+          patterns = {
+             '[\\w./\\\\~-]+\\.[a-zA-Z0-9]+',
+          },
+          action = wezterm.action_callback(function(window, pane)
+             local file = window:get_selection_text_for_pane(pane)
+             if file and file ~= '' then
+                window:perform_action(
+                   act.SpawnCommandInNewTab({ args = { 'nvim', file:match('^%s*(.-)%s*$') } }),
+                   pane
+                )
+             end
+          end),
+       }),
+    },
+
+    -- resizes fonts
+    {
       key = 'f',
       mods = 'LEADER',
       action = act.ActivateKeyTable({

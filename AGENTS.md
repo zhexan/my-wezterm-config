@@ -44,6 +44,11 @@ luacheck wezterm.lua colors/* config/* events/* utils/*
 - **`#` at start of multi-line list tables** triggers a stylua decision: the `keys` and `key_tables` tables use `-- stylua: ignore` comments to preserve manual formatting.
 - **`math.randomseed` is seeded at module load in `utils/backdrops.lua`** (lines 7-10). This has global effect — no other module should re-seed it.
 
+- **`SplitVertical`/`SplitHorizontal` semantics are swapped on this nightly build (Windows x86_64 `20260331-040028-577474d8`)**: `SplitVertical` = 上下分割 (top/bottom), `SplitHorizontal` = 左右分割 (left/right) — opposite of standard WezTerm API docs. See `utils/layouts.lua`.
+- **Pane layout functions require `wezterm.sleep_ms(100-200)` between split/activate commands** to let split operations complete before the next command. See `utils/layouts.lua`.
+- **`SUPER_REV` key mapping**: `mod.SUPER_REV` is defined in `config/bindings.lua:8-13` as platform-dependent (Alt on Windows/Linux, Super on macOS).
+- **Quick file opener** uses `QuickSelectArgs` with a filename pattern (`[\\w./\\\\~-]+\\.[a-zA-Z0-9]+`) and spawns `nvim` in a new tab via `SpawnCommandInNewTab`. See `config/bindings.lua`.
+
 ## Event Module Pattern
 Events follow a consistent pattern:
 1. Validate options with `OptsValidator` (see `utils/opts-validator.lua`)
