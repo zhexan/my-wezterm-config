@@ -1,4 +1,3 @@
----@type Wezterm
 local wezterm = require('wezterm')
 local launch_menu = require('config.launch').launch_menu
 local domains = require('config.domains')
@@ -98,7 +97,7 @@ M.setup = function()
          window:perform_action(default_action, pane)
       end
 
-      if default_action and button == 'Right' then
+      if button == 'Right' then
          window:perform_action(
             act.InputSelector({
                title = 'InputSelector: Launch Menu',
@@ -108,19 +107,14 @@ M.setup = function()
                action = wezterm.action_callback(function(_window, _pane, id, label)
                   if not id and not label then
                      return
-                  else
-                     wezterm.log_info('you selected ', id, label)
-                     wezterm.log_info(choices_data[tonumber(id)])
-                     window:perform_action(
-                        act.SpawnCommandInNewTab(choices_data[tonumber(id)]),
-                        pane
-                     )
                   end
+                  window:perform_action(act.SpawnCommandInNewTab(choices_data[tonumber(id)]), pane)
                end),
             }),
             pane
          )
       end
+
       return false
    end)
 end
