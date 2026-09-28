@@ -3,3 +3,10 @@
 /lua_modules
 /.luarocks
 .DS_Store
+
+# Claude Code 的机器私有设置（含本机路径）
+/.claude/settings.local.json
+
+# WorkBuddy 的工作记忆：含本机路径、内网地址、私钥指纹一类信息，
+# 绝不进公开仓库。工作区那套探针脚本也在这里面。
+/.workbuddy/

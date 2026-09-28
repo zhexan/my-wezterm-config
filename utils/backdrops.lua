@@ -1,5 +1,5 @@
 local wezterm = require('wezterm')
-local colors = require('colors.custom')
+local colors = require('colors.warp')
 
 -- Seeding random numbers before generating for use
 -- Known issue with lua math library
@@ -78,7 +78,9 @@ function BackDrops:_gen_opts()
       width = '120%',
       vertical_offset = '-10%',
       horizontal_offset = '-10%',
-      opacity = 0.5,
+      -- 色层不透明度。Warp 官方主题里背景图的 opacity 是 60（即图 60% / 底色 40%），
+      -- 本文件这层是"底色"，所以要反过来取小值。改前的 0.94 基本等于把壁纸盖死。
+      opacity = 0.55,
    })
 
    return bg_opts

@@ -6,7 +6,10 @@ require('utils.backdrops')
    :random()
 
 require('events.left-status').setup()
-require('events.right-status').setup({ date_format = '%a %H:%M:%S' })
+-- date_format 决定右端块里「时钟」那一格的宽度，而 tab bar 是**单行有限宽**：
+-- 149 列 + 4 个 tab 时右端只剩 ≈62 格，`%a %H:%M:%S`（12 格：Sun 21:31:13）会被
+-- 从左端裁掉首字符。`%H:%M:%S`（8 格）留出余量，星期几在系统任务栏本就有。
+require('events.right-status').setup({ date_format = '%H:%M:%S' })
 require('events.tab-title').setup({
    hide_active_tab_unseen = true,
    unseen_icon = 'numbered_box',

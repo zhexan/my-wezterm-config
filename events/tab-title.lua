@@ -165,9 +165,13 @@ local colors = {
    unseen_output_hover   = { bg = '#7188b0', fg = '#FFA066' },
    unseen_output_active  = { bg = '#89b4fa', fg = '#FFA066' },
 
-   scircle_default       = { bg = 'rgba(0, 0, 0, 0.4)', fg = '#45475A' },
-   scircle_hover         = { bg = 'rgba(0, 0, 0, 0.4)', fg = '#7188b0' },
-   scircle_active        = { bg = 'rgba(0, 0, 0, 0.4)', fg = '#89b4fa' },
+   -- 药丸两端弧的背景：必须**透明**，不能是半透明黑。
+   -- 原因：弧外垫一格暗块时，相邻两个 tab 的「右弧 + 左弧」背靠背紧贴，
+   -- 各自还带一块暗底，视觉上就是「两个药丸叠在一起」（2026-09-27 用户反馈）。
+   -- 透明后弧只留自己的颜色，外侧露出 tab bar 背景，与 left-status.lua 的画法一致。
+   scircle_default       = { bg = 'rgba(0, 0, 0, 0)', fg = '#45475A' },
+   scircle_hover         = { bg = 'rgba(0, 0, 0, 0)', fg = '#7188b0' },
+   scircle_active        = { bg = 'rgba(0, 0, 0, 0)', fg = '#89b4fa' },
 
    progress_percentage_default    = { bg = '#45475A', fg = '#9df296' },
    progress_percentage_hover      = { bg = '#7188b0', fg = '#9df296' },
@@ -527,7 +531,21 @@ function Tab:render()
    if self.has_progress then
       variant_idx = variant_idx + 2
    end
-   return title_cells:render(RV[variant_idx])
+
+   local items = {}
+   for _, item in ipairs(title_cells:render(RV[variant_idx])) do
+      items[#items + 1] = item
+   end
+
+   -- 末尾补 1 格「透明底空格」。
+   -- 原因：WezTerm 的 retro tab bar 是把各 tab 的 FormatItem 直接首尾拼接的，
+   -- 没有「tab 间距」这种概念 —— 于是本 tab 的右弧与下一个 tab 的左弧背靠背，
+   -- 看着像两个圆叠一起。补 1 格后相邻药丸之间就有呼吸了。
+   -- 用透明底而非暗色：tab bar 背景允许壁纸透出，固定色会在壁纸亮部露馅。
+   items[#items + 1] = { Background = { Color = 'rgba(0, 0, 0, 0)' } }
+   items[#items + 1] = { Text = ' ' }
+
+   return items
 end
 
 ---@type Tab[]

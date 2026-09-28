@@ -2,6 +2,7 @@ local wezterm = require('wezterm')
 local platform = require('utils.platform')
 local backdrops = require('utils.backdrops')
 local layouts = require('utils.layouts')
+local status_bar = require('utils.status-bar')
 local act = wezterm.action
 
 local mod = {}
@@ -64,8 +65,19 @@ local keys = {
 
    -- tabs --
    -- tabs: spawn+close
-   { key = 't',          mods = mod.SUPER,     action = act.SpawnTab('DefaultDomain') },
-   { key = 't',          mods = mod.SUPER_REV, action = act.SpawnTab({ DomainName = 'wsl:ubuntu-fish' }) },
+   -- 新 tab 不再需要「切一条 pane 当状态栏」：状态信息现在画在 tab bar 那一行的
+   -- 左右两端（见 events/left-status.lua / events/right-status.lua），
+   -- 是每个窗口一份、天然跟随 tab，不需要逐 tab 挂载。
+   {
+      key = 't',
+      mods = mod.SUPER,
+      action = act.SpawnTab('DefaultDomain'),
+   },
+   {
+      key = 't',
+      mods = mod.SUPER_REV,
+      action = act.SpawnTab({ DomainName = 'wsl:ubuntu-fish' }),
+   },
    { key = 'w',          mods = mod.SUPER_REV, action = act.CloseCurrentTab({ confirm = false }) },
 
    -- tabs: navigation
@@ -206,6 +218,21 @@ local keys = {
    { key = 'd',        mods = mod.SUPER, action = act.ScrollByLine(5) },
    { key = 'PageUp',   mods = 'NONE',    action = act.ScrollByPage(-0.75) },
    { key = 'PageDown', mods = 'NONE',    action = act.ScrollByPage(0.75) },
+
+   -- panes: bottom status bar --
+   -- ⚠️ 这是**早期的 pane 方案**，已不是主路径：状态信息现在由 tab bar 承载
+   -- （events/left-status.lua + events/right-status.lua 用 set_left_status /
+   -- set_right_status 绘制，随窗口一份、不随 tab 增删）。
+   -- 保留此键位是当「临时回退 / 对照」用：按一次切出 1 行 pane 跑
+   -- scripts/status-bar.ps1，再按一次关掉（`wezterm cli kill-pane`）。
+   -- 逻辑与它踩过的坑见 utils/status-bar.lua 的注释。
+   {
+      key = 'b',
+      mods = 'LEADER',
+      action = wezterm.action_callback(function(window, pane)
+         status_bar.toggle(window, pane)
+      end),
+   },
 
     -- key-tables --
     -- pane layouts
