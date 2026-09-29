@@ -425,6 +425,71 @@ function global:prompt {
    }
    catch { }
 
+   # ---- memory sampler: keep the tab-bar memory alive during long tasks ----
+   #
+   # WHY THIS EXISTS: term_mem below is emitted only from this prompt function,
+   # and prompt runs only AFTER a command finishes. A task that runs for ten
+   # minutes therefore leaves the status bar frozen at the value sampled before
+   # it started -- you never see the process grow, which is precisely what you
+   # wanted to watch. (User, 2026-09-29: "a hung task never finishes, so the
+   # memory never updates".) The uptime timer this segment replaced was at
+   # least ticking during long tasks; switching to memory quietly lost that.
+   #
+   # THE FIX: a background thread that samples WorkingSet64 once a second and
+   # overwrites $HOME\.wezterm-mem\<pid>.txt. events/right-status.lua rebuilds
+   # the same path from the term_pid user var and io.open()s it -- microseconds,
+   # so it is safe inside update-status, which must NEVER spawn a subprocess
+   # (190-600 ms per spawn on this machine).
+   #
+   # MEASURED 2026-09-29 on pwsh 7.6.6 (probe _probe_tj.ps1):
+   #   * Start-ThreadJob returns in 28 ms, and its job stays "Running" while the
+   #     main runspace is blocked for 6 s -- 8 samples landed in 8 s.
+   #   * io.open() works fine on this machine's Chinese-username path
+   #     (probe _probe_io.lua: home_dir contains CJK, file read back intact).
+   #
+   # WARNING -- do NOT rewrite this with Register-ObjectEvent or a
+   # System.Timers.Timer callback. Both deliver through PowerShell's event
+   # QUEUE, which the engine drains only when the main runspace is idle -- i.e.
+   # exactly not during the long command this exists for. It has to be a
+   # separate runspace; that is what Start-ThreadJob gives you.
+   #
+   # Assigning to $global: is load-bearing: an unassigned Start-ThreadJob emits
+   # the Job object as pipeline output and prints it into the console.
+   if (-not $global:__MemSampler -or $global:__MemSampler.State -ne 'Running') {
+      try {
+         $memDir = Join-Path $HOME '.wezterm-mem'
+         if (-not (Test-Path -LiteralPath $memDir)) {
+            New-Item -ItemType Directory -Force -Path $memDir | Out-Null
+         }
+         # Housekeeping, once per start: drop samples left by sessions long gone.
+         # A live pane rewrites its file every second, so a running session's
+         # sample is never a day old and cannot be caught here.
+         Get-ChildItem -LiteralPath $memDir -Filter '*.txt' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+         $global:__MemFile = Join-Path $memDir "$PID.txt"
+         $global:__MemSampler = Start-ThreadJob -ScriptBlock {
+            param($file, $targetPid)
+            while ($true) {
+               try {
+                  $p = [System.Diagnostics.Process]::GetProcessById($targetPid)
+                  $mb = [int]($p.WorkingSet64 / 1MB)
+                  $p.Dispose()
+                  # Write-then-rename: a reader must never catch a half-written
+                  # (empty) file, which would blink the segment off for a frame.
+                  $tmp = "$file.tmp"
+                  [IO.File]::WriteAllText($tmp, [string]$mb)
+                  [IO.File]::Move($tmp, $file, $true)
+               }
+               catch { }
+               Start-Sleep -Milliseconds 1000
+            }
+         } -ArgumentList $global:__MemFile, $PID
+      }
+      catch { }
+   }
+
    # ---- report console code pages + memory (OSC 1337 SetUserVar) -----------
    # WezTerm cannot read the shell's code page -- it is shell-private state --
    # so the tab-bar status (events/left-status.lua) gets it from user vars via
@@ -437,18 +502,25 @@ function global:prompt {
    # status line is there to surface. Same pattern as the OSC 7 above -- cheap
    # API calls only, no subprocess.
    #
-   # Plus a third, non-code-page value: this process's working set in MB, which
-   # the right-hand status (events/right-status.lua) shows in its memory
-   # segment. Process::GetCurrentProcess() rather than Get-Process -Id $PID --
-   # the latter runs a full process query and prompt runs after every single
-   # command, so it has to be the cheap one. On failure we simply omit the var
-   # instead of sending a bogus 0, so the segment disappears rather than lying.
+   # Plus two non-code-page values:
+   #   term_pid -- this shell's PID, so the Lua side can locate the sampler file
+   #               written above ($HOME\.wezterm-mem\<pid>.txt). Bare digits, as
+   #               the Lua reader's all-digits test requires.
+   #   term_mem -- this process's working set in MB. It is now a FALLBACK: the
+   #               primary source is that sampler file, which keeps updating
+   #               during long commands. This one only covers the case where the
+   #               background job failed to start. Process::GetCurrentProcess()
+   #               rather than Get-Process -Id $PID -- the latter runs a full
+   #               process query and prompt runs after every single command, so
+   #               it has to be the cheap one. On failure we omit the var instead
+   #               of sending a bogus 0, so the segment disappears rather than
+   #               lying.
    try {
       $encCp = [int][Console]::OutputEncoding.CodePage
       $consoleCp = $encCp
       if ('Wz.ConsoleCp' -as [type]) { $consoleCp = [int][Wz.ConsoleCp]::GetConsoleOutputCP() }
 
-      $vals = @(@('term_chcp', $consoleCp), @('term_enc', $encCp))
+      $vals = @(@('term_chcp', $consoleCp), @('term_enc', $encCp), @('term_pid', $PID))
       try {
          $proc = [System.Diagnostics.Process]::GetCurrentProcess()
          $memMB = [int]($proc.WorkingSet64 / 1MB)

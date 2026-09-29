@@ -42,12 +42,36 @@ local EVENT_OPTS = OptsValidator:new({
 ---（用 `_m1_cells.py` 按 17px 网格扫 tab bar 行即可复核这个数。）
 ---
 ---数据来源分工（别混）：
----  · 计时器 = 纯 Lua（os.time() 与模块加载时刻之差）
----  · 时钟   = wezterm.strftime（内置）
+---  · 时钟   = wezterm.strftime（内置）—— **真正每秒都在动**，本帧现算。
 ---  · Git    = pane cwd → 向上找 .git → 读 .git/HEAD（**纯文件**，≈1 ms）
 ---             只取分支名，对齐 oh-my-posh 默认主题的 ` 分支名` 形态。
 ---  · 编码   = **只能由 shell 上报**（Lua 读不到 pwsh 的控制台代码页）：走
 ---             OSC 1337 SetUserVar，Lua 侧用 pane:get_user_vars() 读；上报端在 pwsh profile 里。
+---  · 内存   = **主通道**：后台采样文件 `~/.wezterm-mem/<pid>.txt` —— shell 的后台线程
+---             每秒覆盖写它，**长任务期间照常更新**；路径靠 shell 上报的 term_pid 拼出。
+---             **降级通道**：shell 上报的 term_mem（MB，整数），只在命令结束时刷新一次。
+---
+---⚠️ **「每秒重绘」与「每秒重新采样」是两件事** —— 分属不同进程，**而且每段各不相同**：
+---
+---  · Lua 侧（本文件）：`update-status` 由 wezterm 每 **1000 ms** 触发一次
+---    （config/general.lua 的 status_update_interval = 1000）。各段都**无缓存**，
+---    每帧都重新取一次数据。
+---  · shell 侧（pwsh profile）：决定**值本身多久变一次**。
+---
+---于是逐段的真实节奏是：
+---
+---  | 段   | 值多久变一次        | 说明 |
+---  | ---- | ------------------- | ---- |
+---  | 时钟 | **每秒**            | `wezterm.strftime` 在 Lua 侧现算，不经过 shell |
+---  | 内存 | **每秒**            | 主通道读后台采样文件（shell 的后台线程每秒覆盖写） |
+---  | git  | 每秒重读，值少变     | 纯文件读 `.git/HEAD` |
+---  | 编码 | **每条命令一次**     | `term_chcp`/`term_enc` 只在 prompt 里上报；值本就几乎不变 |
+---
+---⇒ 只剩「编码」还受 prompt 的节奏约束，而它恰好是四段里最不需要实时性的一个。
+---（非 pwsh 会话没有 `term_pid`/`term_mem`，内存段直接消失。）
+---
+---历史：内存段在 2026-09-29 之前是「每条命令一次」—— 长任务挂着时数字冻住，用户
+---指出这个缺陷后改成现在的后台采样。详见 mem_text 的注释。
 ---
 ---⚠️ Git 与编码都**绝不跑子进程**：本机起任何子进程 ≈ 190–600 ms（实测，
 ---bash 空跑 285ms、git rev-list 600ms、python 900ms），而 update-status 默认
@@ -86,13 +110,20 @@ local GLYPH_GIT = nf.pl_branch --[[  U+E0A0 ]]
 ---分隔符：`│`（U+2502）。custom_block_glyphs 默认开启 → 这个 Box Drawing 字符由
 ---WezTerm 按格子尺寸自绘、占满整格高度，正是状态栏分隔符该有的样子。
 ---颜色用 warp.fg_mute（最不抢眼），让分隔符退到内容后面 —— 旧版用浅青 #74c7ec 太扎眼。
+---
+---⚠️ **两侧不留空格**（用户 2026-09-29：「把状态栏的全部空格去掉，靠分割线间隔功能」）。
+---原写法 `' │ '` 每处白吃 2 格，而分隔符本身已经把两段分开了，空格纯属冗余。
+---⇒ 全部布局空格一律去掉，间距**只由分隔符承担**。
+---（唯一保留空格的地方是 `chcp 936 / utf-8` 这类**文本内部**的语义空格 ——
+--- 去掉会变成 `chcp936/utf-8`，可读性反而更差；那不是布局空格。且该段平时不显示。）
 local ICON_SEPARATOR = '│'
-local SEP_TEXT = ' ' .. ICON_SEPARATOR .. ' '
+local SEP_TEXT = ICON_SEPARATOR
 
 ---shell 上报编码用的 user var 名（pwsh profile 里必须同名）
 local VAR_CHCP = 'term_chcp' -- 控制台代码页（`chcp` 命令的那个）
 local VAR_ENC = 'term_enc' -- [Console]::OutputEncoding.CodePage
-local VAR_MEM = 'term_mem' -- 本 pwsh 进程的工作集（MB，纯数字）
+local VAR_MEM = 'term_mem' -- 本 pwsh 进程的工作集（MB，纯数字）——**降级通道**，见 mem_text
+local VAR_PID = 'term_pid' -- 本 pwsh 的 PID（纯数字），用来定位后台采样文件
 
 ---编码段是否「只在异常时出现」。
 ---true（默认）= 告警灯：一致时整段消失，只有 chcp 与输出编码不一致才跳出来。
@@ -225,29 +256,85 @@ local function read_user_var(pane, name)
    return nil
 end
 
----内存文本：本 pwsh 进程的工作集，由 shell 经 OSC 1337 SetUserVar 上报（MB）。
+---数值 → 显示文本。数值与单位**不留空格**（`171MB` / `1.5GB`）——
+---用户 2026-09-28 明确要求：「数字和MB之间不需要空格」，空间宝贵且单位无歧义。
+---@param mb number
+---@return string
+local function fmt_mb(mb)
+   if mb >= 1024 then
+      return string.format('%.1fGB', mb / 1024)
+   end
+   return mb .. 'MB'
+end
+
+---上一次成功读到的 (pid, 文本)，只用于「恰好读到写入中的文件」时兜底。
+---⚠️ 键用 pid 而不是 pane_id：pid 天然 per-pane 且唯一，pid 一变缓存自动失效，
+---省掉一张要自己维护的 map。
+local mem_last_pid, mem_last_text = nil, nil
+
+---从后台采样文件读内存值（MB）。读不到返回 nil。
+---@param pid string
+---@return number|nil
+local function read_mem_file(pid)
+   -- 路径必须与 pwsh profile 里写的完全一致：$HOME\.wezterm-mem\<pid>.txt
+   -- 本机 home_dir 含中文，实测 io.open 正常（探针 _probe_io.lua：读回内容一致）。
+   local path = wezterm.home_dir .. '/.wezterm-mem/' .. pid .. '.txt'
+   local ok, f = pcall(io.open, path, 'r')
+   if not ok or not f then
+      return nil
+   end
+   local raw = f:read('*a')
+   f:close()
+   return tonumber(raw or '')
+end
+
+---内存文本：本 pwsh 进程的工作集。
+---
+---**两个数据源，按优先级取**：
+---  ① 后台采样文件 `~/.wezterm-mem/<pid>.txt` —— 由 pwsh 的后台线程
+---     （profile 里的 Start-ThreadJob）**每秒**覆盖写入。**主通道**。
+---  ② `term_mem` user var —— shell 每次 prompt 上报一次。**降级通道**，
+---     只在后台 job 起不来时兜底。
+---
+---为什么必须有 ①（用户 2026-09-29 指出的缺陷）：只用 ② 的话，值只在**命令跑完**时
+---刷新一次 —— 跑 10 分钟的任务，这 10 分钟里状态栏显示的都是「命令开始之前」的旧值，
+---恰恰看不到最该看的那段过程。而 ① 的后台线程在**主 runspace 被长命令占住期间照常跑**
+---（探针实测：阻塞 6 s 期间 job 仍为 Running，采样推进 8 个点）。
 ---
 ---为什么是「shell 上报」而不是 WezTerm 自己读：WezTerm 内嵌 Lua **没有**任何
 ---系统状态接口 —— 探针实测 `global.sys` / `global.psutil` / `global.proc` 全为 nil，
 ---只有 battery_info / hostname / target_triple 这类零散能力。所以动态数值一律
 ---得由 shell 推过来，编码段也是同一个套路。
 ---
+---⚠️ 读文件（io.open）**不违反**「回调里不跑子进程」那条铁律：几微秒的文件 IO，
+---不像起子进程要 190–600 ms。但**别**在这里加 `run_child_process`。
+---
 ---未上报时返回 nil（整段消失）—— 非 pwsh 会话（bash、SSH）本来就没有这个值，
 ---显示一个编造的 0 比不显示更糟。
----
----数值与单位**不留空格**（`171MB` / `1.5GB`）—— 用户 2026-09-28 明确要求：
----「数字和MB之间不需要空格」。状态栏空间宝贵，且单位在这里无歧义。
 ---@param pane Pane
 ---@return string|nil
 local function mem_text(pane)
+   local pid = read_user_var(pane, VAR_PID)
+   if pid then
+      local mb = read_mem_file(pid)
+      if mb then
+         local txt = fmt_mb(mb)
+         mem_last_pid, mem_last_text = pid, txt
+         return txt
+      end
+      -- 极少数情况：恰好读到写入中的文件。profile 侧已经用 write-then-rename
+      -- 保证原子性，这里是二重保险 —— 沿用上一帧的值，免得段闪一下。
+      if mem_last_pid == pid then
+         return mem_last_text
+      end
+   end
+
+   -- 降级：shell 每次 prompt 上报的那个值
    local mb = tonumber(read_user_var(pane, VAR_MEM))
-   if not mb then
-      return nil
+   if mb then
+      return fmt_mb(mb)
    end
-   if mb >= 1024 then
-      return string.format('%.1fGB', mb / 1024)
-   end
-   return mb .. 'MB'
+   return nil
 end
 
 ---编码文本 —— **只在出问题时才返回内容**（2026-09-27 用户反馈「utf-8 放状态栏没什么用」后改）。
@@ -451,11 +538,11 @@ M.setup = function(opts)
 
       -- ③ 内存（shell 上报；未上报时整段消失 —— 和编码段同一个套路，
       --    非 pwsh 会话不该显示一个编造出来的数字）
-      -- 图标与数字之间只用 1 格：Material Design 图标（U+F035B）的字形在字框里
-      -- 本就左右各留白，再叠 2 格会显得断开。与下面 git 段（`⑂ master`）保持一致。
+      -- 图标与数字之间**不留空格**：用户 2026-09-29 要求「把状态栏的全部空格去掉，
+      -- 靠分割线间隔功能」。MDI 图标（U+F035B）字形本身在字框内左右留白，视觉上已隔开。
       local mem = mem_text(pane)
       if mem then
-         shown[#shown + 1] = { id = 'mem', text = GLYPH_MEM .. ' ' .. mem, colors = colors.mem }
+         shown[#shown + 1] = { id = 'mem', text = GLYPH_MEM .. mem, colors = colors.mem }
       end
 
       -- ④ Git 分支（非仓库目录时整段消失；钉在最右端 —— 最不该丢的一条）
@@ -467,16 +554,15 @@ M.setup = function(opts)
       if branch then
          shown[#shown + 1] = {
             id = 'git',
-            text = GLYPH_GIT .. ' ' .. branch,
+            text = GLYPH_GIT .. branch, -- 图标与分支名之间不留空格（同上）
             colors = colors.git,
          }
       end
 
-      -- 两端各留 1 格：头部与左侧内容隔开、尾部不贴窗口右沿。
-      if #shown > 0 then
-         shown[1].text = ' ' .. shown[1].text
-         shown[#shown].text = shown[#shown].text .. ' '
-      end
+      -- ⚠️ 这里**曾经**给两端各留 1 格（头部与左侧内容隔开、尾部不贴窗口右沿）。
+      -- 用户 2026-09-29 明确要求去掉：「把状态栏的全部空格去掉，靠分割线间隔功能」。
+      -- ⇒ 现在块内**一个填充空格都没有**，间距全部由 `│` 承担，块紧贴窗口右沿。
+      --   （保留的只有 chcp 那段的文本内部空格，且那段平时不显示。）
 
       -- 清场：分隔符全清，内容段里本帧未出现的也清（否则会残留上一帧的文本）。
       for _, id in ipairs(SEPARATOR_IDS) do
